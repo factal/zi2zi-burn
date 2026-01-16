@@ -1,0 +1,29 @@
+#![recursion_limit = "256"]
+use anyhow::{Context, Result};
+use burn::backend::{Autodiff, WebGpu};
+use burn::config::Config;
+use clap::Parser;
+use std::path::PathBuf;
+use zi2zi_burn::training::TrainingConfig;
+
+#[derive(Parser, Debug)]
+#[command(about = "Train zi2zi with Burn")]
+struct Args {
+    #[arg(long)]
+    experiment_dir: PathBuf,
+    #[arg(long, default_value = "config.json")]
+    config: PathBuf,
+}
+
+fn main() -> Result<()> {
+    let args = Args::parse();
+    let config = TrainingConfig::load(&args.config)
+        .with_context(|| format!("failed to load config from {}", args.config.display()))?;
+
+    type Backend = WebGpu<f32, i32>;
+    type AutodiffBackend = Autodiff<Backend>;
+    let device = burn::backend::wgpu::WgpuDevice::default();
+
+    zi2zi_burn::training::train::<AutodiffBackend>(&args.experiment_dir, config, device)?;
+    Ok(())
+}
