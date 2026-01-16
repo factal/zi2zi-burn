@@ -1,13 +1,14 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use image::{DynamicImage, GenericImage, Rgb, RgbImage};
+use owned_ttf_parser::{AsFaceRef, OutlineBuilder, OwnedFace};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
-use rusttype::{point, Font, Scale};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
+use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Transform};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
@@ -19,17 +20,17 @@ struct Args {
     dst_font: PathBuf,
     #[arg(long, default_value_t = false)]
     filter: bool,
-    #[arg(long, default_value = "CN")]
+    #[arg(long, default_value = "JP")]
     charset: String,
     #[arg(long, default_value_t = false)]
     shuffle: bool,
-    #[arg(long, default_value_t = 150)]
+    #[arg(long, default_value_t = 192)]
     char_size: u32,
     #[arg(long, default_value_t = 256)]
     canvas_size: u32,
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 32)]
     x_offset: i32,
-    #[arg(long, default_value_t = 20)]
+    #[arg(long, default_value_t = 32)]
     y_offset: i32,
     #[arg(long, default_value_t = 1000)]
     sample_count: usize,
@@ -51,6 +52,67 @@ struct CjkCharset {
     kr: Vec<String>,
     #[serde(rename = "gb2312_t")]
     gb2312_t: Vec<String>,
+}
+
+struct FontFace {
+    face: OwnedFace,
+    ascender: f32,
+    height: f32,
+}
+
+struct GlyphPathBuilder {
+    builder: PathBuilder,
+    scale: f32,
+    offset_x: f32,
+    offset_y: f32,
+}
+
+impl GlyphPathBuilder {
+    fn new(scale: f32, offset_x: f32, offset_y: f32) -> Self {
+        Self {
+            builder: PathBuilder::new(),
+            scale,
+            offset_x,
+            offset_y,
+        }
+    }
+
+    fn map_point(&self, x: f32, y: f32) -> (f32, f32) {
+        (self.offset_x + x * self.scale, self.offset_y - y * self.scale)
+    }
+
+    fn finish(self) -> Option<SkiaPath> {
+        self.builder.finish()
+    }
+}
+
+impl OutlineBuilder for GlyphPathBuilder {
+    fn move_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map_point(x, y);
+        self.builder.move_to(x, y);
+    }
+
+    fn line_to(&mut self, x: f32, y: f32) {
+        let (x, y) = self.map_point(x, y);
+        self.builder.line_to(x, y);
+    }
+
+    fn quad_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32) {
+        let (x1, y1) = self.map_point(x1, y1);
+        let (x2, y2) = self.map_point(x2, y2);
+        self.builder.quad_to(x1, y1, x2, y2);
+    }
+
+    fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x3: f32, y3: f32) {
+        let (x1, y1) = self.map_point(x1, y1);
+        let (x2, y2) = self.map_point(x2, y2);
+        let (x3, y3) = self.map_point(x3, y3);
+        self.builder.cubic_to(x1, y1, x2, y2, x3, y3);
+    }
+
+    fn close(&mut self) {
+        let _ = self.builder.close();
+    }
 }
 
 fn main() -> Result<()> {
@@ -89,6 +151,23 @@ fn main() -> Result<()> {
         if count >= args.sample_count {
             break;
         }
+        let src_has = has_glyph(&src_font, ch);
+        let dst_has = has_glyph(&dst_font, ch);
+        if !src_has || !dst_has {
+            let missing = match (src_has, dst_has) {
+                (false, false) => "src_font and dst_font",
+                (false, true) => "src_font",
+                (true, false) => "dst_font",
+                (true, true) => unreachable!(),
+            };
+            eprintln!(
+                "warning: skipping '{}' (U+{:04X}) missing in {}",
+                ch,
+                ch as u32,
+                missing
+            );
+            continue;
+        }
         if let Some(example) = draw_example(
             ch,
             &src_font,
@@ -99,7 +178,7 @@ fn main() -> Result<()> {
             args.y_offset,
             &filter_hashes,
         )? {
-            let file_name = format!("{}_{}.jpg", args.label, format!("{count:04}"));
+            let file_name = format!("{}_{}.png", args.label, format!("{count:04}"));
             let path = args.sample_dir.join(file_name);
             DynamicImage::ImageRgb8(example).save(&path).with_context(|| {
                 format!("failed to save {}", path.display())
@@ -114,11 +193,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Load a font file into a rusttype Font.
-fn load_font(path: &Path) -> Result<Font<'static>> {
+/// Load a font file into a font face that supports CFF/CFF2 outlines.
+fn load_font(path: &Path) -> Result<FontFace> {
     let data = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
-    let font = Font::try_from_vec(data).context("failed to parse font file")?;
-    Ok(font)
+    let face = OwnedFace::from_vec(data, 0).context("failed to parse font file")?;
+    let face_ref = face.as_face_ref();
+    let ascender = face_ref.ascender() as f32;
+    let descender = face_ref.descender() as f32;
+    let height = (ascender - descender).max(1.0); // Match rusttype scale_for_pixel_height.
+    Ok(FontFace {
+        face,
+        ascender,
+        height,
+    })
 }
 
 /// Load the character list from a built-in CJK set or a custom file.
@@ -147,11 +234,19 @@ fn load_charset(args: &Args) -> Result<Vec<char>> {
     }
 }
 
+fn has_glyph(font: &FontFace, ch: char) -> bool {
+    font.face
+        .as_face_ref()
+        .glyph_index(ch)
+        .map(|id| id.0 != 0)
+        .unwrap_or(false)
+}
+
 /// Render a paired target/source sample for a single character.
 fn draw_example(
     ch: char,
-    src_font: &Font,
-    dst_font: &Font,
+    src_font: &FontFace,
+    dst_font: &FontFace,
     char_size: u32,
     canvas_size: u32,
     x_offset: i32,
@@ -174,44 +269,56 @@ fn draw_example(
 /// Render a single character onto a white canvas.
 fn draw_single_char(
     ch: char,
-    font: &Font,
+    font: &FontFace,
     char_size: u32,
     canvas_size: u32,
     x_offset: i32,
     y_offset: i32,
 ) -> RgbImage {
-    let mut image = RgbImage::from_pixel(canvas_size, canvas_size, Rgb([255, 255, 255]));
-    let scale = Scale::uniform(char_size as f32);
-    let v_metrics = font.v_metrics(scale);
-    let glyph = font
-        .glyph(ch)
-        .scaled(scale)
-        .positioned(point(
-            x_offset as f32,
-            y_offset as f32 + v_metrics.ascent,
-        ));
+    let mut pixmap = match Pixmap::new(canvas_size, canvas_size) {
+        Some(pixmap) => pixmap,
+        None => return RgbImage::from_pixel(canvas_size, canvas_size, Rgb([255, 255, 255])),
+    };
+    pixmap.fill(Color::from_rgba8(255, 255, 255, 255));
 
-    if let Some(bb) = glyph.pixel_bounding_box() {
-        glyph.draw(|x, y, v| {
-            let px = x as i32 + bb.min.x;
-            let py = y as i32 + bb.min.y;
-            if px < 0 || py < 0 {
-                return;
-            }
-            let (px, py) = (px as u32, py as u32);
-            if px >= canvas_size || py >= canvas_size {
-                return;
-            }
-            let intensity = (255.0 * (1.0 - v)) as u8;
-            let pixel = image.get_pixel_mut(px, py);
-            pixel.0 = [
-                pixel.0[0].min(intensity),
-                pixel.0[1].min(intensity),
-                pixel.0[2].min(intensity),
-            ];
-        });
+    let face = font.face.as_face_ref();
+    let Some(glyph_id) = face.glyph_index(ch) else {
+        return pixmap_to_rgb(pixmap);
+    };
+    if glyph_id.0 == 0 {
+        return pixmap_to_rgb(pixmap);
     }
 
+    let scale = char_size as f32 / font.height;
+    let baseline_y = y_offset as f32 + font.ascender * scale;
+    let mut builder = GlyphPathBuilder::new(scale, x_offset as f32, baseline_y);
+    if face.outline_glyph(glyph_id, &mut builder).is_none() {
+        return pixmap_to_rgb(pixmap);
+    }
+
+    if let Some(path) = builder.finish() {
+        let mut paint = Paint::default();
+        paint.set_color(Color::from_rgba8(0, 0, 0, 255));
+        let _ = pixmap.fill_path(
+            &path,
+            &paint,
+            FillRule::Winding,
+            Transform::identity(),
+            None,
+        );
+    }
+
+    pixmap_to_rgb(pixmap)
+}
+
+fn pixmap_to_rgb(pixmap: Pixmap) -> RgbImage {
+    let (width, height) = (pixmap.width(), pixmap.height());
+    let data = pixmap.data();
+    let mut image = RgbImage::new(width, height);
+    for (idx, pixel) in image.pixels_mut().enumerate() {
+        let base = idx * 4;
+        pixel.0 = [data[base], data[base + 1], data[base + 2]];
+    }
     image
 }
 
@@ -225,7 +332,7 @@ fn hash_image(img: &RgbImage) -> u64 {
 /// Sample characters and return hashes that appear too frequently.
 fn filter_recurring_hash(
     charset: &[char],
-    font: &Font,
+    font: &FontFace,
     char_size: u32,
     canvas_size: u32,
     x_offset: i32,
@@ -238,6 +345,9 @@ fn filter_recurring_hash(
     let mut counts: HashMap<u64, usize> = HashMap::new();
 
     for ch in sample.iter().take(sample_len) {
+        if !has_glyph(font, *ch) {
+            continue;
+        }
         let img = draw_single_char(*ch, font, char_size, canvas_size, x_offset, y_offset);
         let h = hash_image(&img);
         *counts.entry(h).or_insert(0) += 1;
