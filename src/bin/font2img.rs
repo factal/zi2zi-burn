@@ -8,8 +8,9 @@ use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Transform};
 use std::path::{Path, PathBuf};
+use tiny_skia::{Color, FillRule, Paint, Path as SkiaPath, PathBuilder, Pixmap, Transform};
+
 
 #[derive(Parser, Debug)]
 #[command(about = "Convert fonts to paired training images")]

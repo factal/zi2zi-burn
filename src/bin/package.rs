@@ -21,7 +21,7 @@ struct Args {
     seed: u64,
 }
 
-/// (label, jpeg_bytes) tuple written to the pickle stream.
+/// (label, png_bytes) tuple written to the pickle stream.
 #[derive(Serialize)]
 struct PickledExample(i64, Vec<u8>);
 
@@ -44,7 +44,7 @@ fn main() -> Result<()> {
 
     let mut rng = StdRng::seed_from_u64(args.seed);
     let options = SerOptions::default();
-    let mut paths: Vec<_> = glob(&format!("{}/*.jpg", args.dir.display()))?
+    let mut paths: Vec<_> = glob(&format!("{}/*.png", args.dir.display()))?
         .filter_map(Result::ok)
         .collect();
     paths.sort();

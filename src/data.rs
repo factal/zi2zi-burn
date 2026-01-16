@@ -4,7 +4,7 @@ use burn::tensor::TensorData;
 use image::RgbImage;
 use rand::Rng;
 use serde::Deserialize;
-use serde_pickle::{DeOptions, Deserializer, Error as PickleError};
+use serde_pickle::{DeOptions, Deserializer, Error as PickleError,ErrorCode as PickleErrorCode};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
@@ -16,7 +16,7 @@ pub struct Example {
     pub bytes: Vec<u8>,
 }
 
-/// (label, jpeg_bytes) tuple stored in the pickle stream.
+/// (label, png_bytes) tuple stored in the pickle stream.
 #[derive(Debug, Deserialize)]
 struct PickledExample(i64, Vec<u8>);
 
@@ -36,9 +36,13 @@ pub struct Zi2ziBatch<B: Backend> {
     pub labels: Tensor<B, 1, Int>,
 }
 
-/// Load a pickle stream containing (label, jpeg_bytes) tuples.
+/// Load a pickle stream containing (label, png_bytes) tuples.
 pub fn load_pickled_examples(path: &Path) -> Result<Vec<Example>> {
     let file = File::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    let file_len = file
+        .metadata()
+        .with_context(|| format!("failed to read metadata for {}", path.display()))?
+        .len();
     let mut de = Deserializer::new(BufReader::new(file), DeOptions::default());
     let mut examples = Vec::new();
 
@@ -47,6 +51,11 @@ pub fn load_pickled_examples(path: &Path) -> Result<Vec<Example>> {
         match PickledExample::deserialize(&mut de) {
             Ok(PickledExample(label, bytes)) => examples.push(Example { label, bytes }),
             Err(PickleError::Io(err)) if err.kind() == std::io::ErrorKind::UnexpectedEof => break,
+            Err(PickleError::Eval(PickleErrorCode::EOFWhileParsing, offset))
+                if (offset as u64) == file_len =>
+            {
+                break
+            }
             Err(err) => {
                 return Err(anyhow::anyhow!(
                     "failed to decode pickle stream at {}: {err}",

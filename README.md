@@ -10,7 +10,7 @@ training/inference CLIs under `src/bin`.
 - `infer`: run inference or interpolation
 - `export`: export generator weights
 - `font2img`: render paired images from fonts
-- `package`: package JPGs into pickle streams
+- `package`: package PNGs into pickle streams
 
 ## Requirements
 
@@ -25,21 +25,21 @@ training/inference CLIs under `src/bin`.
 cargo run --bin font2img -- \
   --src-font path/to/src.ttf \
   --dst-font path/to/dst.ttf \
-  --sample-dir ./data/jpg \
+  --sample-dir ./data/png \
   --label 0
 ```
 
-This writes `LABEL_XXXX.jpg` with left=target (dst) and right=source (src).
+This writes `LABEL_XXXX.png` with left=target (dst) and right=source (src).
 
 2. Package to pickle streams:
 
 ```bash
 cargo run --bin package -- \
-  --dir ./data/jpg \
+  --dir ./data/png \
   --save-dir ./data
 ```
 
-This creates `train.obj` and `val.obj` (pickle stream of `(label, jpg_bytes)`
+This creates `train.obj` and `val.obj` (pickle stream of `(label, png_bytes)`
 tuples).
 
 ## Config

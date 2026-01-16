@@ -16,7 +16,7 @@ data preparation.
 - `src/bin/train.rs` trains a model from a Burn config file.
 - `src/bin/infer.rs` runs inference and interpolation over embeddings.
 - `src/bin/export.rs` exports generator weights from a checkpoint.
-- `src/bin/font2img.rs` renders paired JPGs from fonts.
+- `src/bin/font2img.rs` renders paired PNGs from fonts.
 - `src/bin/package.rs` packages JPGs into pickle streams.
 - `charset/` stores large character sets for font rendering.
 - `datasets/` contains example fonts and sample images.
@@ -25,9 +25,9 @@ data preparation.
 
 - `font2img` renders paired images. The left half is the target (dst), and the
   right half is the source (src).
-- `package` writes a pickle stream of `(label, jpg_bytes)` tuples into
+- `package` writes a pickle stream of `(label, png_bytes)` tuples into
   `train.obj` and `val.obj`.
-- `data::build_batch` decodes each JPEG, splits the halves, optionally applies
+- `data::build_batch` decodes each PNG, splits the halves, optionally applies
   augmentation, and normalizes the tensors to CHW in the `[-1, 1]` range.
 
 ## Model architecture

@@ -150,7 +150,7 @@ pub fn train<B: AutodiffBackend>(
             let labels = batch
                 .labels
                 .to_data()
-                .to_vec::<i64>()
+                .to_vec::<i32>()
                 .context("failed to read labels")?;
             let mut shuffled_labels = labels.clone();
             if config.flip_labels {
@@ -395,7 +395,7 @@ fn validate_model<B: AutodiffBackend>(
     let labels_vec = batch
         .labels
         .to_data()
-        .to_vec::<i64>()
+        .to_vec::<i32>()
         .context("failed to read labels")?;
     let labels = Tensor::<B, 1, Int>::from_data(
         TensorData::new(labels_vec.clone(), [labels_vec.len()]),
