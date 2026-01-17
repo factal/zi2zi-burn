@@ -1,6 +1,6 @@
 #![recursion_limit = "256"]
 use anyhow::{Context, Result};
-use burn::backend::WebGpu;
+use burn_cuda::{Cuda, CudaDevice};
 use burn::prelude::*;
 use burn::tensor::TensorData;
 use burn::record::{CompactRecorder, Recorder};
@@ -42,8 +42,8 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    type Backend = WebGpu<f32, i32>;
-    let device = burn::backend::wgpu::WgpuDevice::default();
+    type Backend = Cuda<f32, i32>;
+    let device = CudaDevice::default();
 
     let model_dir = resolve_model_dir(&args.model_dir, args.batch_size);
     if model_dir != args.model_dir {
