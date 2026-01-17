@@ -29,6 +29,7 @@ use burn::train::metric::store::EventStoreClient;
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -597,7 +598,6 @@ impl<B: AutodiffBackend> SupervisedLearningStrategy<Zi2ziComponents<B>>
     ) -> (Zi2ziGan<B>, SupervisedTrainingEventProcessor<Zi2ziComponents<B>>) {
         let mut state = self.start_state.clone();
         let mut rng = StdRng::seed_from_u64(self.config.seed);
-        let mut val_index = 0usize;
 
         if self.config.resume && state.step > 0 {
             if let Some(checkpointer) = training_components.checkpointer.as_ref() {
@@ -665,7 +665,6 @@ impl<B: AutodiffBackend> SupervisedLearningStrategy<Zi2ziComponents<B>>
                         &self.data_config,
                         &self.config,
                         &self.model_dir,
-                        &mut val_index,
                         &mut rng,
                         &self.device,
                         epoch,
@@ -920,7 +919,6 @@ fn validate_model<B: AutodiffBackend>(
     data_config: &DataConfig,
     config: &TrainingConfig,
     model_dir: &Path,
-    val_index: &mut usize,
     rng: &mut StdRng,
     device: &B::Device,
     epoch: usize,
@@ -930,7 +928,11 @@ fn validate_model<B: AutodiffBackend>(
         return Ok(());
     }
 
-    let batch_refs = select_val_batch(val_examples, config.batch_size, val_index);
+    let batch_refs = select_val_batch(val_examples, config.batch_size, rng);
+    if batch_refs.is_empty() {
+        return Ok(());
+    }
+    let batch_size = batch_refs.len();
     let batch = build_batch::<B>(&batch_refs, data_config, false, rng, device)?;
 
     let labels_vec = batch
@@ -954,9 +956,9 @@ fn validate_model<B: AutodiffBackend>(
     let fake_imgs = tensor_to_images(fake_b)?;
     let real_imgs = tensor_to_images(real_b)?;
 
-    let merged_input = merge_images(&input_imgs, config.batch_size, 1)?;
-    let merged_fake = merge_images(&fake_imgs, config.batch_size, 1)?;
-    let merged_real = merge_images(&real_imgs, config.batch_size, 1)?;
+    let merged_input = merge_images(&input_imgs, batch_size, 1)?;
+    let merged_fake = merge_images(&fake_imgs, batch_size, 1)?;
+    let merged_real = merge_images(&real_imgs, batch_size, 1)?;
     let merged_pair = vec![merged_input, merged_real, merged_fake];
 
     let sample_dir = model_dir.join("samples");
@@ -971,17 +973,30 @@ fn validate_model<B: AutodiffBackend>(
     Ok(())
 }
 
-/// Select a rolling validation batch to vary samples over time.
+/// Select a random validation batch with unique labels.
 fn select_val_batch<'a>(
     examples: &'a [Arc<Example>],
     batch_size: usize,
-    start: &mut usize,
+    rng: &mut StdRng,
 ) -> Vec<&'a Example> {
-    let mut batch = Vec::with_capacity(batch_size);
-    for offset in 0..batch_size {
-        let idx = (*start + offset) % examples.len();
-        batch.push(examples[idx].as_ref());
+    if examples.is_empty() || batch_size == 0 {
+        return Vec::new();
     }
-    *start = (*start + batch_size) % examples.len();
+
+    let mut batch = Vec::with_capacity(batch_size);
+    let mut seen = HashSet::new();
+    let mut indices: Vec<usize> = (0..examples.len()).collect();
+    indices.shuffle(rng);
+
+    for idx in indices {
+        let example = examples[idx].as_ref();
+        if seen.insert(example.label) {
+            batch.push(example);
+            if batch.len() == batch_size {
+                break;
+            }
+        }
+    }
+
     batch
 }
