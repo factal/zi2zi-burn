@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use clap::Parser;
 use image::{DynamicImage, GenericImage, Rgb, RgbImage};
 use owned_ttf_parser::{AsFaceRef, OutlineBuilder, OwnedFace};
@@ -116,6 +116,11 @@ impl OutlineBuilder for GlyphPathBuilder {
     }
 }
 
+struct LabeledFontPath {
+    label: i64,
+    path: PathBuf,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut rng = StdRng::seed_from_u64(args.seed);
@@ -125,7 +130,7 @@ fn main() -> Result<()> {
     }
 
     let src_font = load_font(&args.src_font)?;
-    let dst_font = load_font(&args.dst_font)?;
+    let dst_font_paths = collect_dst_font_paths(&args.dst_font, args.label)?;
 
     if !args.sample_dir.exists() {
         fs::create_dir_all(&args.sample_dir).with_context(|| {
@@ -133,65 +138,127 @@ fn main() -> Result<()> {
         })?;
     }
 
-    let filter_hashes = if args.filter {
-        filter_recurring_hash(
-            &charset,
-            &dst_font,
-            args.char_size,
-            args.canvas_size,
-            args.x_offset,
-            args.y_offset,
-            &mut rng,
-        )?
-    } else {
-        HashSet::new()
-    };
+    for dst_entry in &dst_font_paths {
+        let dst_font = load_font(&dst_entry.path)?;
+        let filter_hashes = if args.filter {
+            filter_recurring_hash(
+                &charset,
+                &dst_font,
+                args.char_size,
+                args.canvas_size,
+                args.x_offset,
+                args.y_offset,
+                &mut rng,
+            )?
+        } else {
+            HashSet::new()
+        };
 
-    let mut count = 0usize;
-    for ch in charset {
-        if count >= args.sample_count {
-            break;
-        }
-        let src_has = has_glyph(&src_font, ch);
-        let dst_has = has_glyph(&dst_font, ch);
-        if !src_has || !dst_has {
-            let missing = match (src_has, dst_has) {
-                (false, false) => "src_font and dst_font",
-                (false, true) => "src_font",
-                (true, false) => "dst_font",
-                (true, true) => unreachable!(),
-            };
-            eprintln!(
-                "warning: skipping '{}' (U+{:04X}) missing in {}",
+        let mut count = 0usize;
+        for ch in &charset {
+            if count >= args.sample_count {
+                break;
+            }
+            let ch = *ch;
+            let src_has = has_glyph(&src_font, ch);
+            let dst_has = has_glyph(&dst_font, ch);
+            if !src_has || !dst_has {
+                let missing = match (src_has, dst_has) {
+                    (false, false) => "src_font and dst_font",
+                    (false, true) => "src_font",
+                    (true, false) => "dst_font",
+                    (true, true) => unreachable!(),
+                };
+                eprintln!(
+                    "warning: skipping '{}' (U+{:04X}) missing in {}",
+                    ch,
+                    ch as u32,
+                    missing
+                );
+                continue;
+            }
+            if let Some(example) = draw_example(
                 ch,
-                ch as u32,
-                missing
-            );
-            continue;
-        }
-        if let Some(example) = draw_example(
-            ch,
-            &src_font,
-            &dst_font,
-            args.char_size,
-            args.canvas_size,
-            args.x_offset,
-            args.y_offset,
-            &filter_hashes,
-        )? {
-            let file_name = format!("{}_{}.png", args.label, format!("{count:04}"));
-            let path = args.sample_dir.join(file_name);
-            DynamicImage::ImageRgb8(example).save(&path).with_context(|| {
-                format!("failed to save {}", path.display())
-            })?;
-            count += 1;
-            if count % 100 == 0 {
-                println!("processed {count} chars");
+                &src_font,
+                &dst_font,
+                args.char_size,
+                args.canvas_size,
+                args.x_offset,
+                args.y_offset,
+                &filter_hashes,
+            )? {
+                let file_name = format!("{}_{}.png", dst_entry.label, format!("{count:04}"));
+                let path = args.sample_dir.join(file_name);
+                DynamicImage::ImageRgb8(example).save(&path).with_context(|| {
+                    format!("failed to save {}", path.display())
+                })?;
+                count += 1;
+                if count % 100 == 0 {
+                    println!("label {} processed {count} chars", dst_entry.label);
+                }
             }
         }
     }
 
+    if args.dst_font.is_dir() {
+        let mut log = String::new();
+        for entry in &dst_font_paths {
+            log.push_str(&format!("{}\t{}\n", entry.label, entry.path.display()));
+        }
+        let log_path = args.sample_dir.join("label_map.txt");
+        fs::write(&log_path, log).with_context(|| {
+            format!("failed to write {}", log_path.display())
+        })?;
+    }
+
     Ok(())
+}
+
+fn collect_dst_font_paths(dst_font: &Path, base_label: i64) -> Result<Vec<LabeledFontPath>> {
+    if dst_font.is_dir() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(dst_font)
+            .with_context(|| format!("failed to read {}", dst_font.display()))?
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && is_font_file(path))
+            .collect();
+        entries.sort_by(|a, b| {
+            a.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_lowercase()
+                .cmp(
+                    &b.file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_lowercase(),
+                )
+        });
+        if entries.is_empty() {
+            bail!("no font files found in {}", dst_font.display());
+        }
+        Ok(entries
+            .into_iter()
+            .enumerate()
+            .map(|(idx, path)| LabeledFontPath {
+                label: base_label + idx as i64,
+                path,
+            })
+            .collect())
+    } else {
+        Ok(vec![LabeledFontPath {
+            label: base_label,
+            path: dst_font.to_path_buf(),
+        }])
+    }
+}
+
+fn is_font_file(path: &Path) -> bool {
+    let ext = match path.extension().and_then(|ext| ext.to_str()) {
+        Some(ext) => ext.to_ascii_lowercase(),
+        None => return false,
+    };
+    matches!(ext.as_str(), "ttf" | "otf" | "ttc" | "otc")
 }
 
 /// Load a font file into a font face that supports CFF/CFF2 outlines.
