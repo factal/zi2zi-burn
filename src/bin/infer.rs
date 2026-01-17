@@ -1,16 +1,18 @@
 #![recursion_limit = "256"]
 use anyhow::{Context, Result};
 use burn_cuda::{Cuda, CudaDevice};
+use burn::module::Ignored;
 use burn::prelude::*;
 use burn::tensor::TensorData;
 use burn::record::{CompactRecorder, Recorder};
 use burn::config::Config;
 use clap::Parser;
 use rand::{rngs::StdRng, Rng, SeedableRng};
+use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use zi2zi_burn::data::{build_batch, load_pickled_examples, DataConfig, Example};
-use zi2zi_burn::model::split_real;
+use zi2zi_burn::model::{Discriminator, Generator, LossConfig, ModelConfig, split_real};
 use zi2zi_burn::training::TrainingConfig;
 use zi2zi_burn::utils::{compile_frames_to_gif, concat_images_horiz, merge_images, save_concat_images, tensor_to_images};
 
@@ -39,6 +41,32 @@ struct Args {
     uroboros: bool,
 }
 
+#[derive(Module, Debug)]
+struct Zi2ziGan<B: Backend> {
+    generator: Generator<B>,
+    discriminator: Discriminator<B>,
+    model_config: Ignored<ModelConfig>,
+    loss_config: Ignored<LossConfig>,
+}
+
+impl<B: Backend> Zi2ziGan<B> {
+    fn new(model_config: ModelConfig, loss_config: LossConfig, device: &B::Device) -> Self {
+        let generator = model_config.init_generator(device);
+        let discriminator = model_config.init_discriminator(device);
+        Self {
+            generator,
+            discriminator,
+            model_config: Ignored(model_config),
+            loss_config: Ignored(loss_config),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct TrainingState {
+    step: usize,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -57,13 +85,20 @@ fn main() -> Result<()> {
     let config_path = model_dir.join("config.json");
     let training_config =
         TrainingConfig::load(&config_path).context("failed to load config.json")?;
-    let model_config = training_config.model;
+    let TrainingConfig {
+        model: model_config,
+        loss: loss_config,
+        ..
+    } = training_config;
 
-    let mut generator = model_config.init_generator::<Backend>(&device);
+    let checkpoint_path = resolve_checkpoint_path(&model_dir)
+        .context("failed to resolve model checkpoint")?;
+    let mut model = Zi2ziGan::<Backend>::new(model_config.clone(), loss_config, &device);
     let record = CompactRecorder::new()
-        .load(model_dir.join("generator"), &device)
-        .context("failed to load generator weights")?;
-    generator = generator.load_record(record);
+        .load(checkpoint_path, &device)
+        .context("failed to load model checkpoint")?;
+    model = model.load_record(record);
+    let generator = model.generator;
 
     let data_config = DataConfig {
         image_size: model_config.image_size as u32,
@@ -143,7 +178,7 @@ fn parse_ids(ids: &str, max: usize) -> Result<Vec<i64>> {
 
 /// Resolve a checkpoint directory from an experiment or checkpoint root.
 fn resolve_model_dir(model_dir: &Path, batch_size: usize) -> PathBuf {
-    if model_dir.join("config.json").exists() && model_dir.join("generator").exists() {
+    if is_model_dir(model_dir) {
         return model_dir.to_path_buf();
     }
     let checkpoint_root = if model_dir.join("checkpoint").is_dir() {
@@ -159,7 +194,7 @@ fn resolve_model_dir(model_dir: &Path, batch_size: usize) -> PathBuf {
                 continue;
             }
             let path = entry.path();
-            if path.join("config.json").exists() && path.join("generator").exists() {
+            if is_model_dir(&path) && has_model_checkpoints(&path) {
                 candidates.push(path);
             }
         }
@@ -183,14 +218,120 @@ fn resolve_model_dir(model_dir: &Path, batch_size: usize) -> PathBuf {
     candidates.last().cloned().unwrap_or_else(|| model_dir.to_path_buf())
 }
 
+fn is_model_dir(path: &Path) -> bool {
+    path.join("config.json").exists() && path.join("checkpoint").is_dir()
+}
+
+fn has_model_checkpoints(path: &Path) -> bool {
+    let checkpoint_dir = path.join("checkpoint");
+    if !checkpoint_dir.is_dir() {
+        return false;
+    }
+    fs::read_dir(&checkpoint_dir)
+        .map(|entries| {
+            entries.flatten().any(|entry| is_model_checkpoint_file(&entry.path()))
+        })
+        .unwrap_or(false)
+}
+
+fn is_model_checkpoint_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    let file_name = path.file_name().map(|s| s.to_string_lossy()).unwrap_or_default();
+    file_name.starts_with("model-") && path.extension().map(|s| s == "mpk").unwrap_or(false)
+}
+
 fn latest_mtime(path: &Path) -> std::time::SystemTime {
-    let generator = path.join("generator");
-    if let Ok(meta) = fs::metadata(&generator) {
-        if let Ok(time) = meta.modified() {
-            return time;
+    let checkpoint_dir = path.join("checkpoint");
+    if let Ok(entries) = fs::read_dir(&checkpoint_dir) {
+        let mut latest = std::time::SystemTime::UNIX_EPOCH;
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if !is_model_checkpoint_file(&entry_path) {
+                continue;
+            }
+            if let Ok(time) = entry_path.metadata().and_then(|m| m.modified()) {
+                if time > latest {
+                    latest = time;
+                }
+            }
+        }
+        if latest != std::time::SystemTime::UNIX_EPOCH {
+            return latest;
         }
     }
     fs::metadata(path).and_then(|m| m.modified()).unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+fn resolve_checkpoint_path(model_dir: &Path) -> Result<PathBuf> {
+    let checkpoint_dir = model_dir.join("checkpoint");
+    if !checkpoint_dir.is_dir() {
+        return Err(anyhow::anyhow!(
+            "checkpoint directory not found: {}",
+            checkpoint_dir.display()
+        ));
+    }
+
+    if let Some(state) = read_training_state(model_dir) {
+        let candidate = checkpoint_dir.join(format!("model-{}", state.step));
+        if candidate.with_extension("mpk").exists() {
+            return Ok(candidate);
+        }
+    }
+
+    let mut best_step: Option<(usize, PathBuf)> = None;
+    let mut best_time: Option<(std::time::SystemTime, PathBuf)> = None;
+    if let Ok(entries) = fs::read_dir(&checkpoint_dir) {
+        for entry in entries.flatten() {
+            let entry_path = entry.path();
+            if !is_model_checkpoint_file(&entry_path) {
+                continue;
+            }
+            if let Some(step) = checkpoint_step(&entry_path) {
+                let update = match best_step {
+                    Some((best, _)) => step > best,
+                    None => true,
+                };
+                if update {
+                    best_step = Some((step, entry_path.clone()));
+                }
+            }
+            if let Ok(time) = entry_path.metadata().and_then(|m| m.modified()) {
+                let update = match best_time {
+                    Some((best, _)) => time > best,
+                    None => true,
+                };
+                if update {
+                    best_time = Some((time, entry_path.clone()));
+                }
+            }
+        }
+    }
+
+    if let Some((_, path)) = best_step {
+        return Ok(path.with_extension(""));
+    }
+    if let Some((_, path)) = best_time {
+        return Ok(path.with_extension(""));
+    }
+
+    Err(anyhow::anyhow!(
+        "no model checkpoints found in {}",
+        checkpoint_dir.display()
+    ))
+}
+
+fn read_training_state(model_dir: &Path) -> Option<TrainingState> {
+    let state_path = model_dir.join("state.json");
+    let contents = fs::read_to_string(state_path).ok()?;
+    serde_json::from_str(&contents).ok()
+}
+
+fn checkpoint_step(path: &Path) -> Option<usize> {
+    let stem = path.file_stem()?.to_string_lossy();
+    let step = stem.strip_prefix("model-")?;
+    step.parse::<usize>().ok()
 }
 
 /// Run inference over the dataset and save tiled result images.
