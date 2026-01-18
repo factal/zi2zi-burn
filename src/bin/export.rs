@@ -1,9 +1,11 @@
 #![recursion_limit = "256"]
 use anyhow::{Context, Result};
-use burn_cuda::{Cuda, CudaDevice};
-use burn::record::{CompactRecorder, Recorder};
-use burn::config::Config;
-use burn::prelude::Module;
+use burn::{
+    backend::{Cuda, cuda::CudaDevice},
+    record::{CompactRecorder, Recorder},
+    config::Config,
+    module::Module,
+};
 use clap::Parser;
 use std::fs;
 use std::path::{Path, PathBuf};

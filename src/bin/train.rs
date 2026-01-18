@@ -1,8 +1,9 @@
 #![recursion_limit = "256"]
 use anyhow::{Context, Result};
-use burn::backend::Autodiff;
-use burn::config::Config;
-use burn_cuda::{Cuda, CudaDevice};
+use burn::{
+    backend::{Autodiff, Cuda, cuda::CudaDevice},
+    config::Config,
+};
 use clap::Parser;
 use std::path::PathBuf;
 use zi2zi_burn::training::TrainingConfig;

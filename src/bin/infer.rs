@@ -1,11 +1,13 @@
 #![recursion_limit = "256"]
 use anyhow::{Context, Result};
-use burn_cuda::{Cuda, CudaDevice};
-use burn::module::Ignored;
-use burn::prelude::*;
-use burn::tensor::TensorData;
-use burn::record::{CompactRecorder, Recorder};
-use burn::config::Config;
+use burn::{
+    backend::{Cuda, cuda::CudaDevice},
+    module::Ignored,
+    tensor::TensorData,
+    record::{CompactRecorder, Recorder},
+    config::Config,
+    prelude::*,
+};
 use clap::Parser;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
