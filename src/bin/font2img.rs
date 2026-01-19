@@ -4,7 +4,6 @@ use image::{DynamicImage, GenericImage, Rgb, RgbImage};
 use owned_ttf_parser::{AsFaceRef, OutlineBuilder, OwnedFace};
 use rand::seq::SliceRandom;
 use rand::{rngs::StdRng, SeedableRng};
-use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -39,20 +38,10 @@ struct Args {
     sample_dir: PathBuf,
     #[arg(long, default_value_t = 0)]
     label: i64,
-    #[arg(long, default_value = "./charset/cjk.json")]
+    #[arg(long, default_value = "./charset.json")]
     charset_json: PathBuf,
     #[arg(long, default_value_t = 0)]
     seed: u64,
-}
-
-/// JSON structure for the bundled CJK character sets.
-#[derive(Deserialize)]
-struct CjkCharset {
-    gbk: Vec<String>,
-    jp: Vec<String>,
-    kr: Vec<String>,
-    #[serde(rename = "gb2312_t")]
-    gb2312_t: Vec<String>,
 }
 
 struct FontFace {
@@ -276,30 +265,68 @@ fn load_font(path: &Path) -> Result<FontFace> {
     })
 }
 
-/// Load the character list from a built-in CJK set or a custom file.
+fn load_charset_file(path: &Path) -> Result<Vec<char>> {
+    let line = fs::read_to_string(path)
+        .with_context(|| format!("failed to read charset file {}", path.display()))?;
+    Ok(line.trim_end_matches('\n').chars().collect())
+}
+
+fn charset_list_to_chars(list: &[String]) -> Vec<char> {
+    list.iter().filter_map(|s| s.chars().next()).collect()
+}
+
+/// Load the character list from a charset JSON map or a raw charset file.
 fn load_charset(args: &Args) -> Result<Vec<char>> {
-    match args.charset.as_str() {
-        "CN" | "JP" | "KR" | "CN_T" => {
-            let contents = fs::read_to_string(&args.charset_json).with_context(|| {
-                format!("failed to read {}", args.charset_json.display())
-            })?;
-            let cjk: CjkCharset = serde_json::from_str(&contents)
-                .context("failed to parse charset json")?;
-            let list = match args.charset.as_str() {
-                "CN" => cjk.gbk,
-                "JP" => cjk.jp,
-                "KR" => cjk.kr,
-                "CN_T" => cjk.gb2312_t,
-                _ => unreachable!(),
-            };
-            Ok(list.into_iter().filter_map(|s| s.chars().next()).collect())
+    let charset_path = Path::new(&args.charset);
+    let charset_file_exists = charset_path.is_file();
+
+    let contents = match fs::read_to_string(&args.charset_json) {
+        Ok(contents) => contents,
+        Err(err) => {
+            if charset_file_exists {
+                return load_charset_file(charset_path);
+            }
+            return Err(err)
+                .with_context(|| format!("failed to read {}", args.charset_json.display()));
         }
-        other => {
-            let line = fs::read_to_string(other)
-                .with_context(|| format!("failed to read charset file {other}"))?;
-            Ok(line.trim_end_matches('\n').chars().collect())
+    };
+
+    let map: HashMap<String, Vec<String>> = match serde_json::from_str(&contents) {
+        Ok(map) => map,
+        Err(err) => {
+            if charset_file_exists {
+                return load_charset_file(charset_path);
+            }
+            return Err(err).context("failed to parse charset json");
         }
+    };
+
+    if let Some(list) = map.get(&args.charset) {
+        return Ok(charset_list_to_chars(list));
     }
+    if let Some((_, list)) = map
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(&args.charset))
+    {
+        return Ok(charset_list_to_chars(list));
+    }
+    if charset_file_exists {
+        return load_charset_file(charset_path);
+    }
+
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort_unstable();
+    let key_list = keys
+        .iter()
+        .map(|key| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    bail!(
+        "charset '{}' not found in {} (available keys: {})",
+        args.charset,
+        args.charset_json.display(),
+        key_list
+    )
 }
 
 fn has_glyph(font: &FontFace, ch: char) -> bool {
