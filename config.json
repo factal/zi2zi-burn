@@ -1,0 +1,46 @@
+{
+  "model": {
+    "image_size": 256,
+    "input_channels": 3,
+    "output_channels": 3,
+    "generator_dim": 64,
+    "discriminator_dim": 64,
+    "embedding_num": 40,
+    "embedding_dim": 128,
+    "inst_norm": false
+  },
+  "loss": {
+    "l1_penalty": 100.0,
+    "lconst_penalty": 15.0,
+    "ltv_penalty": 0.0,
+    "lcategory_penalty": 1.0
+  },
+  "data_dir": "data",
+  "experiment_id": 4,
+  "num_epochs": 40,
+  "batch_size": 16,
+  "learning_rate": 0.001,
+  "schedule": 10,
+  "min_learning_rate": 0.0002,
+  "resume": true,
+  "flip_labels": false,
+  "swap_ab": false,
+  "sample_steps": 50,
+  "checkpoint_steps": 500,
+  "seed": 42,
+  "optimizer_gen": {
+    "beta_1": 0.5,
+    "beta_2": 0.999,
+    "epsilon": 1e-5,
+    "weight_decay": null,
+    "grad_clipping": null
+  },
+  "optimizer_disc": {
+    "beta_1": 0.5,
+    "beta_2": 0.999,
+    "epsilon": 1e-5,
+    "weight_decay": null,
+    "grad_clipping": null
+  },
+  "fine_tune": null
+}

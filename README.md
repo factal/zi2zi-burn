@@ -1,10 +1,10 @@
 # zi2zi-burn
 
-Rust/Burn port of the zi2zi pix2pix-style font transfer pipeline. It keeps the
-original data flow (paired half images, label embeddings) and exposes
-training/inference CLIs under `src/bin`.
+A Rust/Burn port of [kaonashi-tyc/zi2zi](https://github.com/kaonashi-tyc/zi2zi).
 
 ## Binaries
+
+CLI binaries (via `cargo run --bin <name>`):
 
 - `train`: train with `config.json`
 - `infer`: run inference or interpolation
@@ -14,33 +14,65 @@ training/inference CLIs under `src/bin`.
 
 ## Requirements
 
-- Rust stable
-- WGPU compatible device (default backend is `WebGpu`)
+- Rust (stable)
+- CUDA (for GPU training/inference)
+- Python 3 (for dataset scripts)
 
-## Data Pipeline
+## Prepare Dataset
 
-1. Render paired samples from fonts:
+The recommended directory structure is as follows:
 
-```bash
-cargo run --bin font2img -- \
-  --src-font path/to/src.ttf \
-  --dst-font path/to/dst.ttf \
-  --sample-dir ./data/png \
-  --label 0
+```
+dataset/
+├── images/
+│   ├── {LABEL}_XXXX.png
+│   └── ...
+├── dst_fonts/
+│   └── (target fonts here)
+└── src_fonts/
+    └── (source fonts here)
+
+experiment/
+├── checkpoint/
+└── data/
+    ├── train.obj
+    └── val.obj
 ```
 
-This writes `LABEL_XXXX.png` with left=target (dst) and right=source (src).
-
-2. Package to pickle streams:
+1. Define the character set to learn:
 
 ```bash
-cargo run --bin package -- \
-  --dir ./data/png \
-  --save-dir ./data
+python scripts/generate_charset.py jp.txt -o charset.json
 ```
 
-This creates `train.obj` and `val.obj` (pickle stream of `(label, png_bytes)`
-tuples).
+Each input text file should contain only the characters you want to include. You can pass multiple files to make a different character set.
+
+2. Render paired samples from fonts:
+
+```bash
+cargo run --bin font2img --release -- \
+  --src-font dataset/src_fonts/src.ttf \
+  --dst-font dataset/dst_fonts \
+  --sample-dir dataset/images \
+  --sample-count 1000 --shuffle
+```
+
+Notes:
+
+- If `--dst-font` is a directory, labels are assigned automatically and a `label_map.txt` is written to `--sample-dir`. When a single font file is specified, use `--labels`.
+- If you passed multiple text files to `generate_charset.py`, you can switch character sets with `--charset`.
+- For small `--sample-count`, enable `--shuffle` to avoid repeated characters.
+- Output files are `{LABEL}_XXXX.png` with left=target (dst) and right=source (src).
+
+3. Package into pickle streams:
+
+```bash
+cargo run --bin package --release -- \
+  --dir dataset/images \
+  --save-dir experiment/data
+```
+
+This creates `train.obj` and `val.obj` (pickle stream of `(label, png_bytes)` tuples) in `experiment/data`.
 
 ## Config
 
@@ -103,9 +135,9 @@ Notes:
 ## Train
 
 ```bash
-cargo run --bin train -- \
-  --experiment-dir ./experiments/exp1 \
-  --config ./config.json
+cargo run --bin train --release -- \
+  --experiment-dir experiment \
+  --config config.json
 ```
 
 Checkpoints are stored under
@@ -114,35 +146,29 @@ Checkpoints are stored under
 ## Inference
 
 ```bash
-cargo run --bin infer -- \
-  --model-dir ./experiments/exp1 \
-  --source-obj ./data/val.obj \
+cargo run --bin infer --release -- \
+  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --source-obj experiment/data/val.obj \
   --embedding-ids 0 \
-  --save-dir ./out
+  --save-dir out
 ```
 
 Interpolation:
 
 ```bash
-cargo run --bin infer -- \
-  --model-dir ./experiments/exp1 \
-  --source-obj ./data/val.obj \
+cargo run --bin infer --release -- \
+  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --source-obj experiment/data/val.obj \
   --embedding-ids 0,1,2 \
   --interpolate --steps 10 --output-gif interp.gif \
-  --save-dir ./out
+  --save-dir out
 ```
 
 ## Export
 
 ```bash
-cargo run --bin export -- \
-  --model-dir ./experiments/exp1 \
-  --save-dir ./export \
+cargo run --bin export --release -- \
+  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --save-dir export \
   --model-name gen_model
 ```
-
-## Notes
-
-- `charset/cjk.json` is large; use `--charset` to select a subset or pass a
-  one-line charset file.
-- The current data pipeline assumes RGB images (3 channels).
