@@ -521,7 +521,7 @@ fn infer_batches<B: Backend>(
             data_config.output_channels,
         );
         let (fake_b, _) = generator.forward(real_a.clone(), labels);
-        let merged = format_pair(real_a, real_b, fake_b, batch_size, true)?;
+        let merged = format_pair(real_a, real_b, fake_b, batch_size, false)?;
         buffer.push(merged);
         if buffer.len() == 10 {
             let path = save_dir.join(format!("inferred_{count:04}_{run_timestamp}.png"));
@@ -742,24 +742,24 @@ fn compile_gifs_for_images(
     Ok(())
 }
 
-/// Assemble a single grid image for (input, real, fake) or (real, fake).
+/// Assemble a single grid image for (source, fake) or (source, target, fake).
 fn format_pair<B: Backend>(
-    real_a: Tensor<B, 4>,
-    real_b: Tensor<B, 4>,
-    fake_b: Tensor<B, 4>,
+    source: Tensor<B, 4>,
+    target: Tensor<B, 4>,
+    fake: Tensor<B, 4>,
     batch_size: usize,
-    include_input: bool,
+    include_target: bool,
 ) -> Result<image::RgbImage> {
-    let input_imgs = tensor_to_images(real_a)?;
-    let real_imgs = tensor_to_images(real_b)?;
-    let fake_imgs = tensor_to_images(fake_b)?;
-    let merged_real = merge_images(&real_imgs, batch_size, 1)?;
+    let source_imgs = tensor_to_images(source)?;
+    let fake_imgs = tensor_to_images(fake)?;
+    let merged_source = merge_images(&source_imgs, batch_size, 1)?;
     let merged_fake = merge_images(&fake_imgs, batch_size, 1)?;
-    if include_input {
-        let merged_input = merge_images(&input_imgs, batch_size, 1)?;
-        concat_images_horiz(&[merged_input, merged_real, merged_fake])
+    if include_target {
+        let target_imgs = tensor_to_images(target)?;
+        let merged_target = merge_images(&target_imgs, batch_size, 1)?;
+        concat_images_horiz(&[merged_source, merged_target, merged_fake])
     } else {
-        concat_images_horiz(&[merged_real, merged_fake])
+        concat_images_horiz(&[merged_source, merged_fake])
     }
 }
 
