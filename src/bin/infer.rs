@@ -9,6 +9,7 @@ use burn::{
     prelude::*,
 };
 use clap::Parser;
+use chrono::Local;
 use rand::{rngs::StdRng, Rng, SeedableRng};
 use serde::Deserialize;
 use std::fs;
@@ -117,6 +118,7 @@ fn main() -> Result<()> {
     fs::create_dir_all(&args.save_dir)?;
     let embedding_ids = parse_ids(&args.embedding_ids, model_config.embedding_num)?;
     let mut rng = StdRng::seed_from_u64(0);
+    let run_timestamp = current_timestamp_millis();
 
     if !args.interpolate {
         infer_batches(
@@ -126,6 +128,7 @@ fn main() -> Result<()> {
             &embedding_ids,
             &args.save_dir,
             args.batch_size,
+            &run_timestamp,
             &mut rng,
             &device,
         )?;
@@ -149,6 +152,7 @@ fn main() -> Result<()> {
                 args.steps,
                 &args.save_dir,
                 args.batch_size,
+                &run_timestamp,
                 &mut rng,
                 &device,
             )?;
@@ -176,6 +180,15 @@ fn parse_ids(ids: &str, max: usize) -> Result<Vec<i64>> {
         ));
     }
     Ok(parsed)
+}
+
+fn current_timestamp_millis() -> String {
+    let now = Local::now();
+    format!(
+        "{}{:03}",
+        now.format("%Y%m%d%H%M%S"),
+        now.timestamp_subsec_millis()
+    )
 }
 
 /// Resolve a checkpoint directory from an experiment or checkpoint root.
@@ -344,6 +357,7 @@ fn infer_batches<B: Backend>(
     embedding_ids: &[i64],
     save_dir: &Path,
     batch_size: usize,
+    run_timestamp: &str,
     rng: &mut StdRng,
     device: &B::Device,
 ) -> Result<()> {
@@ -369,7 +383,7 @@ fn infer_batches<B: Backend>(
         let merged = format_pair(real_a, real_b, fake_b, batch_size, true)?;
         buffer.push(merged);
         if buffer.len() == 10 {
-            let path = save_dir.join(format!("inferred_{count:04}.png"));
+            let path = save_dir.join(format!("inferred_{count:04}_{run_timestamp}.png"));
             save_concat_images(&buffer, &path)?;
             buffer.clear();
             count += 1;
@@ -377,7 +391,7 @@ fn infer_batches<B: Backend>(
     }
 
     if !buffer.is_empty() {
-        let path = save_dir.join(format!("inferred_{count:04}.png"));
+        let path = save_dir.join(format!("inferred_{count:04}_{run_timestamp}.png"));
         save_concat_images(&buffer, &path)?;
     }
 
@@ -394,6 +408,7 @@ fn interpolate_chain<B: Backend>(
     steps: usize,
     save_dir: &Path,
     batch_size: usize,
+    run_timestamp: &str,
     rng: &mut StdRng,
     device: &B::Device,
 ) -> Result<()> {
@@ -414,7 +429,9 @@ fn interpolate_chain<B: Backend>(
             let merged = format_pair(real_a, real_b, fake_b, batch_size, false)?;
             buffer.push(merged);
         }
-        let filename = format!("frame_{start_id:02}_{end_id:02}_step_{step_idx:02}.png");
+        let filename = format!(
+            "frame_{start_id:02}_{end_id:02}_step_{step_idx:02}_{run_timestamp}.png"
+        );
         save_concat_images(&buffer, &save_dir.join(filename))?;
     }
     Ok(())
