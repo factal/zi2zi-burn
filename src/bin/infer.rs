@@ -26,8 +26,10 @@ struct Args {
     model_dir: PathBuf,
     #[arg(long, default_value_t = 16)]
     batch_size: usize,
-    #[arg(long)]
-    source_obj: PathBuf,
+    #[arg(long, conflicts_with = "source_image")]
+    source_obj: Option<PathBuf>,
+    #[arg(long, conflicts_with = "source_obj")]
+    source_image: Option<PathBuf>,
     #[arg(long)]
     embedding_ids: String,
     #[arg(long)]
@@ -70,6 +72,16 @@ struct TrainingState {
     step: usize,
 }
 
+enum InputSource {
+    Pickle(PathBuf),
+    Images(Vec<PathBuf>),
+}
+
+struct ImageSample {
+    input: image::RgbImage,
+    target: Option<image::RgbImage>,
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
 
@@ -110,55 +122,99 @@ fn main() -> Result<()> {
         swap_ab: args.swap_ab,
     };
 
-    let examples = load_pickled_examples(&args.source_obj)?;
-    if examples.is_empty() {
-        return Err(anyhow::anyhow!("no examples in {}", args.source_obj.display()));
-    }
-
+    let input_source = resolve_input_source(&args)?;
     fs::create_dir_all(&args.save_dir)?;
     let embedding_ids = parse_ids(&args.embedding_ids, model_config.embedding_num)?;
+    if args.interpolate && embedding_ids.len() < 2 {
+        return Err(anyhow::anyhow!("need at least two embedding ids to interpolate"));
+    }
     let mut rng = StdRng::seed_from_u64(0);
     let run_timestamp = current_timestamp_millis();
 
-    if !args.interpolate {
-        infer_batches(
-            &generator,
-            &examples,
-            &data_config,
-            &embedding_ids,
-            &args.save_dir,
-            args.batch_size,
-            &run_timestamp,
-            &mut rng,
-            &device,
-        )?;
-    } else {
-        if embedding_ids.len() < 2 {
-            return Err(anyhow::anyhow!("need at least two embedding ids to interpolate"));
+    match input_source {
+        InputSource::Pickle(source_obj) => {
+            let examples = load_pickled_examples(&source_obj)?;
+            if examples.is_empty() {
+                return Err(anyhow::anyhow!("no examples in {}", source_obj.display()));
+            }
+            if !args.interpolate {
+                infer_batches(
+                    &generator,
+                    &examples,
+                    &data_config,
+                    &embedding_ids,
+                    &args.save_dir,
+                    args.batch_size,
+                    &run_timestamp,
+                    &mut rng,
+                    &device,
+                )?;
+            } else {
+                let mut chain = embedding_ids.clone();
+                if args.uroboros {
+                    chain.push(chain[0]);
+                }
+                for pair in chain.windows(2) {
+                    let start = pair[0];
+                    let end = pair[1];
+                    interpolate_chain(
+                        &generator,
+                        &examples,
+                        &data_config,
+                        start,
+                        end,
+                        args.steps,
+                        &args.save_dir,
+                        args.batch_size,
+                        &run_timestamp,
+                        &mut rng,
+                        &device,
+                    )?;
+                }
+                if let Some(gif_name) = &args.output_gif {
+                    compile_frames_to_gif(&args.save_dir, &args.save_dir.join(gif_name))?;
+                }
+            }
         }
-        let mut chain = embedding_ids.clone();
-        if args.uroboros {
-            chain.push(chain[0]);
-        }
-        for pair in chain.windows(2) {
-            let start = pair[0];
-            let end = pair[1];
-            interpolate_chain(
-                &generator,
-                &examples,
-                &data_config,
-                start,
-                end,
-                args.steps,
-                &args.save_dir,
-                args.batch_size,
-                &run_timestamp,
-                &mut rng,
-                &device,
-            )?;
-        }
-        if let Some(gif_name) = &args.output_gif {
-            compile_frames_to_gif(&args.save_dir, &args.save_dir.join(gif_name))?;
+        InputSource::Images(image_paths) => {
+            validate_image_model_config(&data_config)?;
+            if !args.interpolate {
+                infer_image_batches(
+                    &generator,
+                    &image_paths,
+                    &data_config,
+                    &embedding_ids,
+                    &args.save_dir,
+                    args.batch_size,
+                    &run_timestamp,
+                    &mut rng,
+                    &device,
+                )?;
+            } else {
+                let mut chain = embedding_ids.clone();
+                if args.uroboros {
+                    chain.push(chain[0]);
+                }
+                for pair in chain.windows(2) {
+                    let start = pair[0];
+                    let end = pair[1];
+                    interpolate_image_chain(
+                        &generator,
+                        &image_paths,
+                        &data_config,
+                        start,
+                        end,
+                        args.steps,
+                        &args.save_dir,
+                        args.batch_size,
+                        &run_timestamp,
+                        &device,
+                    )?;
+                }
+                if let Some(gif_name) = &args.output_gif {
+                    compile_gifs_for_images(&image_paths, &args.save_dir, gif_name)?;
+                }
+            }
         }
     }
 
@@ -189,6 +245,77 @@ fn current_timestamp_millis() -> String {
         now.format("%Y%m%d%H%M%S"),
         now.timestamp_subsec_millis()
     )
+}
+
+fn resolve_input_source(args: &Args) -> Result<InputSource> {
+    match (&args.source_obj, &args.source_image) {
+        (Some(_), Some(_)) => Err(anyhow::anyhow!(
+            "provide only one of --source-obj or --source-image"
+        )),
+        (Some(path), None) => Ok(InputSource::Pickle(path.clone())),
+        (None, Some(path)) => Ok(InputSource::Images(collect_image_paths(path)?)),
+        (None, None) => Err(anyhow::anyhow!(
+            "either --source-obj or --source-image is required"
+        )),
+    }
+}
+
+fn collect_image_paths(path: &Path) -> Result<Vec<PathBuf>> {
+    if path.is_file() {
+        return Ok(vec![path.to_path_buf()]);
+    }
+    if !path.is_dir() {
+        return Err(anyhow::anyhow!(
+            "source_image must be a file or directory, got {}",
+            path.display()
+        ));
+    }
+
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(path)
+        .with_context(|| format!("failed to read {}", path.display()))?
+    {
+        let entry = entry?;
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let entry_path = entry.path();
+        if has_supported_image_extension(&entry_path) {
+            paths.push(entry_path);
+        }
+    }
+
+    paths.sort();
+    if paths.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no image files found in {}",
+            path.display()
+        ));
+    }
+    Ok(paths)
+}
+
+fn has_supported_image_extension(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "bmp" | "gif" | "tif" | "tiff" | "webp"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn validate_image_model_config(config: &DataConfig) -> Result<()> {
+    if config.input_channels != 3 || config.output_channels != 3 {
+        return Err(anyhow::anyhow!(
+            "image input expects RGB models (input_channels=3, output_channels=3), got input_channels={}, output_channels={}",
+            config.input_channels,
+            config.output_channels
+        ));
+    }
+    Ok(())
 }
 
 /// Resolve a checkpoint directory from an experiment or checkpoint root.
@@ -398,6 +525,67 @@ fn infer_batches<B: Backend>(
     Ok(())
 }
 
+/// Run inference over raw image inputs and save per-image results.
+fn infer_image_batches<B: Backend>(
+    generator: &zi2zi_burn::model::Generator<B>,
+    image_paths: &[PathBuf],
+    data_config: &DataConfig,
+    embedding_ids: &[i64],
+    save_dir: &Path,
+    batch_size: usize,
+    run_timestamp: &str,
+    rng: &mut StdRng,
+    device: &B::Device,
+) -> Result<()> {
+    let total_batches = (image_paths.len() + batch_size - 1) / batch_size;
+    let image_size = data_config.image_size as usize;
+    let channels = data_config.input_channels;
+
+    for batch_idx in 0..total_batches {
+        let start = batch_idx * batch_size;
+        let end = (start + batch_size).min(image_paths.len());
+        let batch_paths = &image_paths[start..end];
+        let mut inputs = Vec::with_capacity(batch_paths.len());
+        let mut targets = Vec::with_capacity(batch_paths.len());
+        let mut batch = Vec::with_capacity(batch_paths.len() * channels * image_size * image_size);
+
+        for path in batch_paths {
+            let sample = load_image_sample(path, data_config.image_size, data_config.swap_ab)?;
+            let mut chw = image_to_chw(&sample.input);
+            batch.append(&mut chw);
+            inputs.push(sample.input);
+            targets.push(sample.target);
+        }
+
+        let labels_vec = build_labels(embedding_ids, batch_paths.len(), rng);
+        let labels = Tensor::<B, 1, Int>::from_data(
+            TensorData::new(labels_vec, [batch_paths.len()]),
+            device,
+        );
+        let images = Tensor::<B, 4>::from_data(
+            TensorData::new(batch, [batch_paths.len(), channels, image_size, image_size]),
+            device,
+        );
+
+        let (fake_b, _) = generator.forward(images, labels);
+        let fake_imgs = tensor_to_images(fake_b)?;
+
+        for (local_idx, path) in batch_paths.iter().enumerate() {
+            let output_path =
+                output_path_for_image(save_dir, path, start + local_idx, run_timestamp);
+            let mut tiles = Vec::with_capacity(3);
+            tiles.push(inputs[local_idx].clone());
+            if let Some(ref target) = targets[local_idx] {
+                tiles.push(target.clone());
+            }
+            tiles.push(fake_imgs[local_idx].clone());
+            save_concat_images(&tiles, &output_path)?;
+        }
+    }
+
+    Ok(())
+}
+
 /// Interpolate between two embeddings and save frames for each step.
 fn interpolate_chain<B: Backend>(
     generator: &zi2zi_burn::model::Generator<B>,
@@ -433,6 +621,84 @@ fn interpolate_chain<B: Backend>(
             "frame_{start_id:02}_{end_id:02}_step_{step_idx:02}_{run_timestamp}.png"
         );
         save_concat_images(&buffer, &save_dir.join(filename))?;
+    }
+    Ok(())
+}
+
+/// Interpolate between two embeddings for raw image inputs.
+fn interpolate_image_chain<B: Backend>(
+    generator: &zi2zi_burn::model::Generator<B>,
+    image_paths: &[PathBuf],
+    data_config: &DataConfig,
+    start_id: i64,
+    end_id: i64,
+    steps: usize,
+    save_dir: &Path,
+    batch_size: usize,
+    run_timestamp: &str,
+    device: &B::Device,
+) -> Result<()> {
+    let steps = steps.max(1);
+    let total_batches = (image_paths.len() + batch_size - 1) / batch_size;
+    let image_size = data_config.image_size as usize;
+    let channels = data_config.input_channels;
+
+    for step_idx in 0..=steps {
+        let alpha = step_idx as f64 / steps as f64;
+        for batch_idx in 0..total_batches {
+            let start = batch_idx * batch_size;
+            let end = (start + batch_size).min(image_paths.len());
+            let batch_paths = &image_paths[start..end];
+            let mut inputs = Vec::with_capacity(batch_paths.len());
+            let mut targets = Vec::with_capacity(batch_paths.len());
+            let mut batch = Vec::with_capacity(batch_paths.len() * channels * image_size * image_size);
+
+            for path in batch_paths {
+                let sample = load_image_sample(path, data_config.image_size, data_config.swap_ab)?;
+                let mut chw = image_to_chw(&sample.input);
+                batch.append(&mut chw);
+                inputs.push(sample.input);
+                targets.push(sample.target);
+            }
+
+            let images = Tensor::<B, 4>::from_data(
+                TensorData::new(batch, [batch_paths.len(), channels, image_size, image_size]),
+                device,
+            );
+            let (fake_b, _) =
+                generator.forward_interpolated(images, start_id, end_id, alpha);
+            let fake_imgs = tensor_to_images(fake_b)?;
+
+            for (local_idx, path) in batch_paths.iter().enumerate() {
+                let frame_dir = frame_dir_for_image(save_dir, path, start + local_idx);
+                fs::create_dir_all(&frame_dir)?;
+                let filename = format!(
+                    "frame_{start_id:02}_{end_id:02}_step_{step_idx:02}_{run_timestamp}.png"
+                );
+                let output_path = frame_dir.join(filename);
+                let mut tiles = Vec::with_capacity(3);
+                tiles.push(inputs[local_idx].clone());
+                if let Some(ref target) = targets[local_idx] {
+                    tiles.push(target.clone());
+                }
+                tiles.push(fake_imgs[local_idx].clone());
+                save_concat_images(&tiles, &output_path)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn compile_gifs_for_images(
+    image_paths: &[PathBuf],
+    save_dir: &Path,
+    gif_name: &str,
+) -> Result<()> {
+    for (index, path) in image_paths.iter().enumerate() {
+        let frame_dir = frame_dir_for_image(save_dir, path, index);
+        let gif_path = frame_dir.join(gif_name);
+        compile_frames_to_gif(&frame_dir, &gif_path)?;
     }
     Ok(())
 }
@@ -480,4 +746,84 @@ fn build_labels(ids: &[i64], batch_size: usize, rng: &mut StdRng) -> Vec<i64> {
             ids[idx]
         })
         .collect()
+}
+
+fn load_image_sample(path: &Path, image_size: u32, swap_ab: bool) -> Result<ImageSample> {
+    if swap_ab {
+        return Err(anyhow::anyhow!(
+            "swap_ab is only supported for paired training data (pickle)"
+        ));
+    }
+    let img = image::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?
+        .to_rgb8();
+    let (width, height) = img.dimensions();
+    if width == image_size && height == image_size {
+        return Ok(ImageSample {
+            input: img,
+            target: None,
+        });
+    }
+
+    Err(anyhow::anyhow!(
+        "image size mismatch for {}: expected {}x{}, got {}x{}",
+        path.display(),
+        image_size,
+        image_size,
+        width,
+        height
+    ))
+}
+
+fn image_to_chw(img: &image::RgbImage) -> Vec<f32> {
+    let (width, height) = img.dimensions();
+    let hw = (width * height) as usize;
+    let mut out = vec![0.0f32; hw * 3];
+
+    for y in 0..height {
+        for x in 0..width {
+            let pixel = img.get_pixel(x, y).0;
+            let idx = (y * width + x) as usize;
+            out[idx] = (pixel[0] as f32 / 127.5) - 1.0;
+            out[hw + idx] = (pixel[1] as f32 / 127.5) - 1.0;
+            out[2 * hw + idx] = (pixel[2] as f32 / 127.5) - 1.0;
+        }
+    }
+
+    out
+}
+
+fn output_path_for_image(
+    save_dir: &Path,
+    path: &Path,
+    index: usize,
+    run_timestamp: &str,
+) -> PathBuf {
+    let stem = sanitize_stem(path);
+    save_dir.join(format!("{index:04}_{stem}_{run_timestamp}.png"))
+}
+
+fn frame_dir_for_image(save_dir: &Path, path: &Path, index: usize) -> PathBuf {
+    let stem = sanitize_stem(path);
+    save_dir.join(format!("{index:04}_{stem}"))
+}
+
+fn sanitize_stem(path: &Path) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("image");
+    let mut cleaned = String::with_capacity(stem.len());
+    for ch in stem.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            cleaned.push(ch);
+        } else {
+            cleaned.push('_');
+        }
+    }
+    if cleaned.is_empty() {
+        "image".to_string()
+    } else {
+        cleaned
+    }
 }

@@ -42,7 +42,7 @@ experiment/
 1. Define the character set to learn:
 
 ```bash
-python scripts/generate_charset.py jp.txt -o charset.json
+python ./scripts/generate_charset.py jp.txt -o charset.json
 ```
 
 Each input text file should contain only the characters you want to include. You can pass multiple files to make a different character set.
@@ -51,9 +51,9 @@ Each input text file should contain only the characters you want to include. You
 
 ```bash
 cargo run --bin font2img --release -- \
-  --src-font dataset/src_fonts/src.ttf \
-  --dst-font dataset/dst_fonts \
-  --sample-dir dataset/images \
+  --src-font ./dataset/src_fonts/src.ttf \
+  --dst-font ./dataset/dst_fonts \
+  --sample-dir ./dataset/images \
   --sample-count 1000 --shuffle
 ```
 
@@ -68,8 +68,8 @@ Notes:
 
 ```bash
 cargo run --bin package --release -- \
-  --dir dataset/images \
-  --save-dir experiment/data
+  --dir ./dataset/images \
+  --save-dir ./experiment/data
 ```
 
 This creates `train.obj` and `val.obj` (pickle stream of `(label, png_bytes)` tuples) in `experiment/data`.
@@ -98,7 +98,7 @@ Training reads a Burn config file. Example `config.json`:
   },
   "data_dir": "data",
   "experiment_id": 0,
-  "num_epochs": 100,
+  "num_epochs": 40,
   "batch_size": 16,
   "learning_rate": 0.001,
   "schedule": 10,
@@ -136,8 +136,8 @@ Notes:
 
 ```bash
 cargo run --bin train --release -- \
-  --experiment-dir experiment \
-  --config config.json
+  --experiment-dir ./experiment \
+  --config ./config.json
 ```
 
 Checkpoints are stored under
@@ -147,18 +147,33 @@ Checkpoints are stored under
 
 ```bash
 cargo run --bin infer --release -- \
-  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
-  --source-obj experiment/data/val.obj \
+  --model-dir ./experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --source-obj ./experiment/data/val.obj \
   --embedding-ids 0 \
   --save-dir out
 ```
+
+Image input:
+
+```bash
+cargo run --bin infer --release -- \
+  --model-dir ./experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --source-image ./path/to/image_or_dir \
+  --embedding-ids 0 \
+  --save-dir out
+```
+
+Notes:
+
+- `--source-image` accepts a single image file or a directory of images.
+- Images must match the model `image_size` (e.g. 256x256, see `experiment_{id}_batch_{batch}/config.json`); mismatched sizes error out.
 
 Interpolation:
 
 ```bash
 cargo run --bin infer --release -- \
-  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
-  --source-obj experiment/data/val.obj \
+  --model-dir ./experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --source-obj ./experiment/data/val.obj \
   --embedding-ids 0,1,2 \
   --interpolate --steps 10 --output-gif interp.gif \
   --save-dir out
@@ -168,7 +183,7 @@ cargo run --bin infer --release -- \
 
 ```bash
 cargo run --bin export --release -- \
-  --model-dir experiment/checkpoint/experiment_{id}_batch_{batch} \
-  --save-dir export \
+  --model-dir ./experiment/checkpoint/experiment_{id}_batch_{batch} \
+  --save-dir ./export \
   --model-name gen_model
 ```
