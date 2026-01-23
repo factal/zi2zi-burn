@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use zi2zi_burn::data::{build_batch, load_pickled_examples, DataConfig, Example};
 use zi2zi_burn::model::{Discriminator, Generator, LossConfig, ModelConfig, split_real};
 use zi2zi_burn::training::TrainingConfig;
-use zi2zi_burn::utils::{compile_frames_to_gif, concat_images_horiz, merge_images, save_concat_images, tensor_to_images};
+use zi2zi_burn::utils::{compile_frames_to_gif_from_paths, concat_images_horiz, merge_images, save_concat_images, tensor_to_images};
 
 #[derive(Parser, Debug)]
 #[command(about = "Inference for zi2zi")]
@@ -154,6 +154,11 @@ fn main() -> Result<()> {
                 if args.uroboros {
                     chain.push(chain[0]);
                 }
+                let mut gif_frames = if args.output_gif.is_some() {
+                    Some(Vec::new())
+                } else {
+                    None
+                };
                 for pair in chain.windows(2) {
                     let start = pair[0];
                     let end = pair[1];
@@ -167,12 +172,13 @@ fn main() -> Result<()> {
                         &args.save_dir,
                         args.batch_size,
                         &run_timestamp,
+                        &mut gif_frames,
                         &mut rng,
                         &device,
                     )?;
                 }
-                if let Some(gif_name) = &args.output_gif {
-                    compile_frames_to_gif(&args.save_dir, &args.save_dir.join(gif_name))?;
+                if let (Some(gif_name), Some(frames)) = (&args.output_gif, gif_frames.as_ref()) {
+                    compile_frames_to_gif_from_paths(frames, &args.save_dir.join(gif_name))?;
                 }
             }
         }
@@ -195,6 +201,11 @@ fn main() -> Result<()> {
                 if args.uroboros {
                     chain.push(chain[0]);
                 }
+                let mut gif_frames = if args.output_gif.is_some() {
+                    Some(vec![Vec::new(); image_paths.len()])
+                } else {
+                    None
+                };
                 for pair in chain.windows(2) {
                     let start = pair[0];
                     let end = pair[1];
@@ -208,11 +219,14 @@ fn main() -> Result<()> {
                         &args.save_dir,
                         args.batch_size,
                         &run_timestamp,
+                        &mut gif_frames,
                         &device,
                     )?;
                 }
-                if let Some(gif_name) = &args.output_gif {
-                    compile_gifs_for_images(&image_paths, &args.save_dir, gif_name)?;
+                if let (Some(gif_name), Some(frames_by_image)) =
+                    (&args.output_gif, gif_frames.as_ref())
+                {
+                    compile_gifs_for_images(&image_paths, frames_by_image, &args.save_dir, gif_name)?;
                 }
             }
         }
@@ -597,6 +611,7 @@ fn interpolate_chain<B: Backend>(
     save_dir: &Path,
     batch_size: usize,
     run_timestamp: &str,
+    gif_frames: &mut Option<Vec<PathBuf>>,
     rng: &mut StdRng,
     device: &B::Device,
 ) -> Result<()> {
@@ -620,7 +635,11 @@ fn interpolate_chain<B: Backend>(
         let filename = format!(
             "frame_{start_id:02}_{end_id:02}_step_{step_idx:02}_{run_timestamp}.png"
         );
-        save_concat_images(&buffer, &save_dir.join(filename))?;
+        let output_path = save_dir.join(filename);
+        save_concat_images(&buffer, &output_path)?;
+        if let Some(frames) = gif_frames.as_mut() {
+            frames.push(output_path);
+        }
     }
     Ok(())
 }
@@ -636,6 +655,7 @@ fn interpolate_image_chain<B: Backend>(
     save_dir: &Path,
     batch_size: usize,
     run_timestamp: &str,
+    gif_frames: &mut Option<Vec<Vec<PathBuf>>>,
     device: &B::Device,
 ) -> Result<()> {
     let steps = steps.max(1);
@@ -670,7 +690,8 @@ fn interpolate_image_chain<B: Backend>(
             let fake_imgs = tensor_to_images(fake_b)?;
 
             for (local_idx, path) in batch_paths.iter().enumerate() {
-                let frame_dir = frame_dir_for_image(save_dir, path, start + local_idx);
+                let global_idx = start + local_idx;
+                let frame_dir = frame_dir_for_image(save_dir, path, global_idx);
                 fs::create_dir_all(&frame_dir)?;
                 let filename = format!(
                     "frame_{start_id:02}_{end_id:02}_step_{step_idx:02}_{run_timestamp}.png"
@@ -683,6 +704,9 @@ fn interpolate_image_chain<B: Backend>(
                 }
                 tiles.push(fake_imgs[local_idx].clone());
                 save_concat_images(&tiles, &output_path)?;
+                if let Some(frames_by_image) = gif_frames.as_mut() {
+                    frames_by_image[global_idx].push(output_path);
+                }
             }
         }
     }
@@ -692,13 +716,28 @@ fn interpolate_image_chain<B: Backend>(
 
 fn compile_gifs_for_images(
     image_paths: &[PathBuf],
+    frames_by_image: &[Vec<PathBuf>],
     save_dir: &Path,
     gif_name: &str,
 ) -> Result<()> {
-    for (index, path) in image_paths.iter().enumerate() {
+    if frames_by_image.len() != image_paths.len() {
+        return Err(anyhow::anyhow!(
+            "gif frame tracking mismatch: expected {}, got {}",
+            image_paths.len(),
+            frames_by_image.len()
+        ));
+    }
+
+    for (index, (path, frames)) in image_paths.iter().zip(frames_by_image.iter()).enumerate() {
         let frame_dir = frame_dir_for_image(save_dir, path, index);
+        if frames.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no frames tracked for {}",
+                frame_dir.display()
+            ));
+        }
         let gif_path = frame_dir.join(gif_name);
-        compile_frames_to_gif(&frame_dir, &gif_path)?;
+        compile_frames_to_gif_from_paths(frames, &gif_path)?;
     }
     Ok(())
 }

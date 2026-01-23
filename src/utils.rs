@@ -3,7 +3,7 @@ use burn::prelude::*;
 use gif::{Encoder, Frame, Repeat};
 use image::{GenericImage, Rgb, RgbImage};
 use std::fs::File;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Map [-1, 1] normalized values back to [0, 1].
 pub fn scale_back(value: f32) -> f32 {
@@ -113,19 +113,20 @@ pub fn save_concat_images(images: &[RgbImage], path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Compile PNG frames in a directory into an animated GIF.
-pub fn compile_frames_to_gif(frame_dir: &Path, gif_path: &Path) -> Result<()> {
-    let mut frames: Vec<_> = glob::glob(&format!("{}/**/*.png", frame_dir.display()))?
-        .filter_map(Result::ok)
-        .collect();
-    frames.sort();
-
-    if frames.is_empty() {
-        return Err(anyhow::anyhow!("no png frames found in {}", frame_dir.display()));
+/// Compile a list of PNG frames into an animated GIF.
+pub fn compile_frames_to_gif_from_paths(
+    frame_paths: &[PathBuf],
+    gif_path: &Path,
+) -> Result<()> {
+    if frame_paths.is_empty() {
+        return Err(anyhow::anyhow!(
+            "no frames provided for {}",
+            gif_path.display()
+        ));
     }
 
-    let first = image::open(&frames[0])
-        .with_context(|| format!("failed to open {}", frames[0].display()))?
+    let first = image::open(&frame_paths[0])
+        .with_context(|| format!("failed to open {}", frame_paths[0].display()))?
         .to_rgb8();
     let (width, height) = first.dimensions();
     // Downscale to ~33% to match the original Python GIF output size.
@@ -137,7 +138,7 @@ pub fn compile_frames_to_gif(frame_dir: &Path, gif_path: &Path) -> Result<()> {
     let mut encoder = Encoder::new(&mut file, target_width as u16, target_height as u16, &[])?;
     encoder.set_repeat(Repeat::Infinite)?;
 
-    for frame_path in frames {
+    for frame_path in frame_paths {
         let img = image::open(&frame_path)
             .with_context(|| format!("failed to open {}", frame_path.display()))?
             .to_rgb8();
@@ -157,4 +158,18 @@ pub fn compile_frames_to_gif(frame_dir: &Path, gif_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Compile PNG frames in a directory into an animated GIF.
+pub fn compile_frames_to_gif(frame_dir: &Path, gif_path: &Path) -> Result<()> {
+    let mut frames: Vec<_> = glob::glob(&format!("{}/**/*.png", frame_dir.display()))?
+        .filter_map(Result::ok)
+        .collect();
+    frames.sort();
+
+    if frames.is_empty() {
+        return Err(anyhow::anyhow!("no png frames found in {}", frame_dir.display()));
+    }
+
+    compile_frames_to_gif_from_paths(&frames, gif_path)
 }
